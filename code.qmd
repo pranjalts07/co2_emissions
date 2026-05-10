@@ -1,0 +1,470 @@
+---
+title: "CO₂ Emissions and Fuel Consumption: A Multiple Linear Regression Analysis of Canadian Vehicle Data"
+author: "Pranjal tariga suresh"
+format:
+  html:
+    embed-resources: true
+    self-contained-math: true
+editor: visual
+---
+
+## Introduction
+
+Vehicle tailpipe CO2 emissions measure how much carbon dioxide a vehicle releases per kilometer driven. Understanding which vehicle characteristics drive emissions matters for consumers, manufacturers, and environmental regulators. In this paper we use multiple linear regression to model CO2 emissions as a function of combined fuel consumption and fuel type.
+
+The main research questions are: (1) How does combined fuel consumption relate to CO2 emissions, and is that relationship the same across fuel types? (2) After accounting for fuel consumption, does fuel type have an additional effect on emissions? (3) Can we build a parsimonious regression model that satisfies the standard assumptions and makes reliable predictions?
+
+## Data Description
+
+The data come from the Government of Canada open vehicle fuel consumption ratings database (Vira, 2024), available on Kaggle at https://www.kaggle.com/datasets/bhuviranga/co2-emissions. Each row represents one vehicle model and trim. The full data set has 7,385 rows and 12 columns.
+
+One vehicle using natural gas fuel (coded N) was removed because it was the only observation of that type. Including a single-observation factor level causes problems during model fitting. The final analysis data set has $n = 7{,}384$ observations.
+
+The response variable is CO2 emissions in grams per kilometer (g/km). The main quantitative predictor is combined city and highway fuel consumption in liters per 100 km (`fuel_comb`). We also include `fuel_type`, a categorical predictor with four levels: X (regular gasoline, the reference group, $n = 3{,}637$), Z (premium gasoline, $n = 3{,}202$), E (ethanol blend E85, $n = 370$), and D (diesel, $n = 175$). Regular gasoline is the reference group because it is the largest group and the most common fuel type.
+
+## Methods and Results
+
+### Step 1: Setup and Data Loading
+
+We load four packages. `tidyverse` gives us `ggplot2` for plots and `dplyr` for data manipulation. `MASS` gives us `boxcox()`. `car` gives us `ncvTest()` and `vif()`. `broom` gives us `tidy()` for clean model output. We set `options(scipen = 999)` so R prints full numbers instead of scientific notation. We set `theme_bw()` so all ggplot figures use a clean black-and-white theme.
+
+```{r}
+#| message: false
+#| warning: false
+
+pacman::p_load(tidyverse, MASS, car, broom)
+
+options(scipen = 999)
+theme_set(theme_bw())
+
+co2_raw <- read.csv("CO2 Emissions.csv")
+```
+
+We use `read.csv()` because the column names in this file contain spaces and special characters. The raw data set is stored as `co2_raw` so we can always return to the original if needed.
+
+### Step 2: Inspect the Raw Data
+
+Before cleaning anything, we look at the raw data. We check the first rows, the dimensions, the column names, and the structure. This tells us what type each column is and whether anything looks unexpected.
+
+```{r}
+head(co2_raw)
+dim(co2_raw)
+names(co2_raw)
+str(co2_raw)
+```
+
+The output shows 7,385 rows and 12 columns. The response variable is `CO2.Emissions.g.km.`. R has replaced spaces and special characters in column names with dots. The `str()` output confirms that CO2 is stored as an integer and all fuel consumption columns are numeric. There are no immediate signs of data type problems.
+
+### Step 3: Clean and Prepare the Data
+
+We remove the one natural gas vehicle, rename all columns to short readable names, and set the reference level for fuel type in one piped operation. We call the cleaned data `co2` to distinguish it from `co2_raw`.
+
+```{r}
+table(co2_raw$Fuel.Type)
+
+co2 <- co2_raw %>%
+  filter(Fuel.Type != "N") %>%
+  rename(
+    make          = Make,
+    model         = Model,
+    vehicle_class = Vehicle.Class,
+    engine        = Engine.Size.L.,
+    cylinders     = Cylinders,
+    transmission  = Transmission,
+    fuel_type     = Fuel.Type,
+    fuel_city     = Fuel.Consumption.City..L.100.km.,
+    fuel_hwy      = Fuel.Consumption.Hwy..L.100.km.,
+    fuel_comb     = Fuel.Consumption.Comb..L.100.km.,
+    fuel_mpg      = Fuel.Consumption.Comb..mpg.,
+    CO2           = CO2.Emissions.g.km.
+  ) %>%
+  mutate(fuel_type = relevel(factor(fuel_type), ref = "X"))
+
+dim(co2)
+levels(co2$fuel_type)
+table(co2$fuel_type)
+colSums(is.na(co2))
+```
+
+The `table()` before cleaning confirms there is only one N vehicle. After filtering it out we have 7,384 rows. The `relevel()` call makes X (regular gasoline) the reference category, so every fuel type coefficient in the model will be interpreted as the difference from regular gasoline, holding fuel consumption fixed. We check `levels()` to confirm X appears first. We check `colSums(is.na(co2))` to confirm there are no missing values. Missing values would distort every downstream calculation.
+
+### Step 4: Basic Summaries
+
+Before any plots or models, we look at numerical summaries of the response and key predictors. This tells us the range of each variable and whether the prediction point we plan to use later is inside the observed data range.
+
+```{r}
+summary(co2[, c("CO2", "engine", "cylinders", "fuel_comb")])
+```
+
+*Table 1. Summary statistics for CO2 emissions and key quantitative predictors (*$n = 7{,}384$).
+
+CO2 emissions range from 96 to 522 g/km with a mean of 250.6 g/km. Combined fuel consumption ranges from 4.1 to 26.1 L/100 km. The prediction point we use later is 9.0 L/100 km for a regular gasoline vehicle. This is well inside the observed range for fuel type X (4.1 to 21.2 L/100 km), so the prediction will be an interpolation, not an extrapolation.
+
+### Step 5: Exploratory Visuals
+
+**Why we start with histograms.** Before fitting any model we look at the distribution of the response. A right-skewed or asymmetric distribution of CO2 is a signal that a transformation may be needed. We plot both the raw CO2 and the square root of CO2 side by side to see whether the transformation makes the distribution more symmetric. This motivates the Box-Cox analysis in Step 6.
+
+```{r}
+#| fig-width: 7
+#| fig-height: 3.5
+
+par(mfrow = c(1, 2))
+hist(co2$CO2,
+     main = "Histogram of CO2",
+     xlab = "CO2 emissions (g/km)")
+hist(sqrt(co2$CO2),
+     main = "Histogram of sqrt(CO2)",
+     xlab = "sqrt(CO2)")
+par(mfrow = c(1, 1))
+```
+
+*Figure 1. Distribution of CO2 emissions on the original scale (left) and after a square root transformation (right).*
+
+The original CO2 distribution is right-skewed with a long upper tail. The square root transformation makes it much more symmetric. This visual suggests a square root transformation will be useful, and we confirm this formally with Box-Cox in Step 6.
+
+**Why we check the correlations next.** We have several fuel consumption variables: city, highway, combined, and mpg. If their correlations are very high, including more than one in the model creates severe multicollinearity without adding any new information. The correlation matrix answers this.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+pairs(CO2 ~ engine + cylinders + fuel_comb,
+      pch = 19, cex = 0.20, data = co2,
+      main = "Figure 2. Scatterplot matrix of quantitative variables")
+
+round(cor(dplyr::select(co2, CO2, engine, cylinders,
+                         fuel_city, fuel_hwy, fuel_comb, fuel_mpg)), 3)
+```
+
+*Figure 2. Scatterplot matrix. Table 2. Pairwise correlations including all fuel consumption variables.*
+
+The correlation between `fuel_city` and `fuel_comb` is 0.994. The correlation between `fuel_hwy` and `fuel_comb` is 0.977. These three variables are nearly identical in terms of their relationship with CO2. Including all three in one model would be redundant and would inflate standard errors severely. We keep only `fuel_comb` because it represents both city and highway driving and is the standard reported figure. We also note that engine size and cylinders are highly correlated with each other ($r = 0.928$), which we address formally in Step 7.
+
+**Why we check the fuel consumption range by fuel type.** Ethanol blend vehicles (E) use much more fuel per kilometer because E85 has lower energy density than gasoline. If we fit a model that pools all fuel types together using a single curve, the ethanol group may pull the curve in a misleading direction. Checking the range of `fuel_comb` within each fuel type tells us whether some groups occupy very different parts of the predictor space.
+
+```{r}
+co2 %>%
+  group_by(fuel_type) %>%
+  summarize(
+    n              = n(),
+    min_fuel_comb  = min(fuel_comb),
+    max_fuel_comb  = max(fuel_comb),
+    mean_fuel_comb = round(mean(fuel_comb), 2)
+  )
+```
+
+*Table 3. Range of combined fuel consumption within each fuel type.*
+
+Ethanol vehicles span 10.1 to 26.1 L/100 km with a mean of 16.9. Regular and premium gasoline vehicles span roughly the same lower range of 4 to 22. Diesel vehicles are concentrated between 6 and 12. This confirms that ethanol vehicles occupy a very different part of the predictor space. A model that allows a separate curve for each fuel type is more appropriate than one that forces a common curve.
+
+**Why we plot CO2 against fuel consumption by fuel type.** The scatterplot with separate quadratic curves for each fuel type gives us a visual check of whether an interaction model will make sense. If the curves are parallel or nearly identical, we do not need interactions. If they differ clearly in slope or curvature, interactions are warranted.
+
+```{r}
+#| fig-width: 6
+#| fig-height: 4
+
+ggplot(co2, aes(x = fuel_comb, y = CO2, color = fuel_type)) +
+  geom_point(alpha = 0.20, size = 0.6) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2, raw = TRUE),
+              se = FALSE) +
+  labs(x = "Combined fuel consumption (L/100 km)",
+       y = "CO2 emissions (g/km)",
+       color = "Fuel type",
+       title = "Figure 3. CO2 vs fuel consumption by fuel type")
+```
+
+*Figure 3. Quadratic curves fitted separately for each fuel type.*
+
+The curves are clearly different. The ethanol (E) curve rises more steeply and at a different rate than the gasoline curves. The diesel (D) curve is shifted compared to regular and premium gasoline. This visual strongly suggests that an interaction model will outperform an additive model.
+
+```{r}
+#| fig-width: 5
+#| fig-height: 4
+
+ggplot(co2, aes(x = fuel_type, y = CO2, fill = fuel_type)) +
+  geom_boxplot(show.legend = FALSE) +
+  labs(x = "Fuel type",
+       y = "CO2 emissions (g/km)",
+       title = "Figure 4. CO2 emissions by fuel type",
+       caption = "X = regular gasoline, Z = premium, D = diesel, E = ethanol")
+```
+
+*Figure 4. Boxplot of CO2 emissions by fuel type.*
+
+Even without controlling for fuel consumption, the groups differ. Premium gasoline vehicles (Z) have a higher median than regular gasoline (X). Diesel (D) vehicles have a lower median than both gasoline types. Ethanol (E) vehicles have the lowest median but the widest spread, reflecting the fact that E85 vehicles range from small compact cars to heavy pickup trucks.
+
+### Step 6: Full Model and Box-Cox Transformation
+
+**Why we fit a model before Box-Cox.** The Box-Cox procedure requires an existing regression model as input. It uses the residuals from that model to estimate the optimal power transformation of the response. We use the full second-order multiplicative model as the starting point because it is the most flexible model we consider. This model includes engine size, cylinders, and combined fuel consumption, their squared terms, their two-way interactions, and fuel type.
+
+```{r}
+lm1 <- lm(
+  CO2 ~ I(engine^2) + I(cylinders^2) + I(fuel_comb^2) +
+    engine    * cylinders +
+    engine    * fuel_comb +
+    cylinders * fuel_comb +
+    fuel_type,
+  data = co2
+)
+
+summary(lm1)
+```
+
+The summary of `lm1` shows $R^2 = 0.9951$ on the original CO2 scale. This model is only the starting point for Box-Cox, not the final model.
+
+**Why we zoom the Box-Cox plot.** The default `boxcox()` range is $-2$ to $2$. The histograms in Step 5 suggested $\lambda$ will be near 0.5. Setting `lambda = seq(0.3, 0.7, by = 0.01)` zooms the plot to that region, making it easier to read the exact peak and the 95% confidence interval.
+
+```{r}
+#| fig-width: 5
+#| fig-height: 4
+
+boxcox(lm1, lambda = seq(0.3, 0.7, by = 0.01))
+title(sub = "Figure 5. Box-Cox log-likelihood. Dashed lines show 95% CI for lambda.")
+
+pt1 <- powerTransform(lm1)
+summary(pt1)
+```
+
+*Figure 5. Box-Cox log-likelihood profile for the full original-scale model.*
+
+The estimated power is $\hat{\lambda} = 0.498$ with a 95% Wald confidence interval of $(0.485, 0.510)$. The value $\lambda = 0.5$ is inside this interval. The likelihood ratio test strongly rejects both $\lambda = 0$ (log transformation) and $\lambda = 1$ (no transformation). This gives clear evidence that a square root transformation of CO2 is the right choice.
+
+**What this means going forward.** All models from this point use $\sqrt{\text{CO2}}$ as the response. When we make predictions, we will square the fitted values to return them to the original g/km scale. We do not compare AIC values across models with different response transformations because AIC is only comparable when the response variable is the same.
+
+### Step 7: Check for Redundant Predictors Using VIF
+
+**Why we check VIF before building the model.** The correlation matrix in Step 5 showed that engine size and cylinders are highly correlated with each other ($r = 0.928$) and both are correlated with `fuel_comb`. Before deciding which predictors to include, we quantify this multicollinearity directly using variance inflation factors. A VIF above 5 means the standard errors for that predictor are inflated relative to what they would be if the predictors were uncorrelated.
+
+```{r}
+lm_vif <- lm(sqrt(CO2) ~ engine + cylinders + fuel_comb, data = co2)
+vif(lm_vif)
+```
+
+Engine size has VIF = 8.52 and cylinders has VIF = 7.25. Both are above 5, confirming severe multicollinearity. Engine and cylinders are providing information that largely overlaps with `fuel_comb`. Including all three in the same model would inflate standard errors and make coefficients unstable. We proceed with `fuel_comb` as the main quantitative predictor.
+
+### Step 8: Model Selection Using Stepwise AIC
+
+We fit the full second-order multiplicative model on the $\sqrt{\text{CO2}}$ scale, including the quadratic term for `fuel_comb`, fuel type, and their interactions. We then apply stepwise selection using the AIC criterion to find the most parsimonious model. AIC penalizes model complexity — a smaller AIC is better. We do not compare AIC values across models with different response transformations because AIC is only comparable when the response variable is the same.
+
+```{r}
+lm_log_full <- lm(
+  sqrt(CO2) ~ (fuel_comb + I(fuel_comb^2)) * fuel_type,
+  data = co2
+)
+
+lm2 <- step(lm_log_full, trace = 0)
+
+summary(lm2)
+
+formula(lm2)
+
+AIC(lm2)
+```
+
+The stepwise AIC procedure selected the final model reported above via `formula(lm2)`. The AIC for the final model is reported by `AIC(lm2)`. The adjusted $R^2$ is 0.9974, meaning the model explains 99.7% of the variation in $\sqrt{\text{CO2}}$.
+
+### Step 9: Final Model
+
+```{r}
+lm_final <- lm2
+
+formula(lm_final)
+summary(lm_final)
+confint(lm_final)
+```
+
+The final model is:
+
+$$\sqrt{\widehat{\text{CO2}}} = \hat{\beta}_0 + \hat{\beta}_1 \, \texttt{fuel\_comb} + \hat{\beta}_2 \, \texttt{fuel\_comb}^2 + \hat{\beta}_3 \, D_{D} + \hat{\beta}_4 \, D_{E} + \hat{\beta}_5 \, D_{Z} + \hat{\beta}_6 \, (\texttt{fuel\_comb} \cdot D_{D}) + \hat{\beta}_7 \, (\texttt{fuel\_comb} \cdot D_{E}) + \hat{\beta}_8 \, (\texttt{fuel\_comb} \cdot D_{Z}) + \hat{\beta}_9 \, (\texttt{fuel\_comb}^2 \cdot D_{D}) + \hat{\beta}_{10} \, (\texttt{fuel\_comb}^2 \cdot D_{E}) + \hat{\beta}_{11} \, (\texttt{fuel\_comb}^2 \cdot D_{Z})$$
+
+where $D_D$, $D_E$, $D_Z$ are indicator variables for diesel, ethanol, and premium gasoline, with regular gasoline (X) as the reference.
+
+Because the model includes squared terms and interactions, no single coefficient has a simple interpretation. The effect of one unit increase in `fuel_comb` on $\sqrt{\text{CO2}}$ depends on the current value of `fuel_comb` and the fuel type. The slope for regular gasoline vehicles at any given `fuel_comb` value is $\hat{\beta}_1 + 2\hat{\beta}_2 \cdot
+\texttt{fuel\_comb}$. The fitted curves in Figure 5 are the correct tool for interpretation.
+
+The adjusted $R^2$ is 0.9974. The model explains 99.7% of the variation in $\sqrt{\text{CO2}}$.
+
+We now plot the final fitted curves on the original CO2 scale. We generate predictions over the observed `fuel_comb` range for each fuel type separately to avoid extrapolating beyond the data for any group.
+
+```{r}
+#| fig-width: 6
+#| fig-height: 4
+
+new_grid <- co2 %>%
+  group_by(fuel_type) %>%
+  summarize(
+    fuel_comb = list(seq(min(fuel_comb), max(fuel_comb), length.out = 200)),
+    .groups = "drop"
+  ) %>%
+  unnest(fuel_comb)
+
+new_grid$fit_sqrt <- predict(lm_final, newdata = new_grid)
+new_grid$fit_co2  <- new_grid$fit_sqrt^2
+
+ggplot(co2, aes(x = fuel_comb, y = CO2, color = fuel_type)) +
+  geom_point(alpha = 0.20, size = 0.6) +
+  geom_line(data = new_grid, aes(y = fit_co2), linewidth = 1) +
+  labs(x = "Combined fuel consumption (L/100 km)",
+       y = "CO2 emissions (g/km)",
+       color = "Fuel type",
+       title = "Figure 5. Final model fitted curves on the original CO2 scale")
+```
+
+*Figure 5. Each curve shows the fitted relationship between combined fuel consumption and CO2 for one fuel type, back-transformed to the original scale by squaring.*
+
+The regular (X) and premium (Z) gasoline curves are close together and rise steeply. The diesel (D) curve is shifted because diesel vehicles emit more CO2 per liter of fuel even though they use less fuel per kilometer. The ethanol (E) curve rises more steeply because E85 vehicles consume much more fuel per kilometer due to ethanol's lower energy density.
+
+### Step 10: Assumption Checks
+
+**Why we use four diagnostic plots together.** Each of the four plots from `plot(lm_final)` checks a different aspect of the regression assumptions. The residuals versus fitted plot checks linearity and constant variance. The Q-Q plot checks normality. The scale-location plot also checks constant variance. The residuals versus leverage plot identifies influential observations. None of these is sufficient alone. We read all four together.
+
+```{r}
+#| fig-width: 7
+#| fig-height: 5
+
+par(mfrow = c(2, 2))
+plot(lm_final)
+par(mfrow = c(1, 1))
+```
+
+*Figure 6. Standard diagnostic plots for the final model.*
+
+**Why we also plot standardized residuals against `fuel_comb` and fuel type.** The four standard plots use fitted values on the x-axis. Plotting residuals against the original predictor `fuel_comb` reveals whether any pattern remains related to fuel consumption specifically. Plotting by fuel type reveals whether the variance is larger for one group.
+
+```{r}
+#| fig-width: 7
+#| fig-height: 3.5
+
+par(mfrow = c(1, 2))
+plot(co2$fuel_comb, rstandard(lm_final),
+     pch = 19, cex = 0.4,
+     xlab = "Combined fuel consumption (L/100 km)",
+     ylab = "Standardized residuals")
+abline(h = 0)
+
+boxplot(rstandard(lm_final) ~ co2$fuel_type,
+        xlab = "Fuel type",
+        ylab = "Standardized residuals")
+abline(h = 0)
+par(mfrow = c(1, 1))
+```
+
+*Figure 7. Standardized residuals vs fuel consumption (left) and by fuel type (right).*
+
+The residuals versus `fuel_comb` plot shows larger spread at higher fuel consumption values, especially for ethanol vehicles. The boxplot by fuel type shows the ethanol group (E) has a wider spread and more extreme values. This is the main source of the assumption violations we detect below.
+
+**Constant variance.** The residual plots suggest heteroskedasticity. We test this formally with the non-constant variance score test.
+
+$H_0$: the variance of the residuals is constant.
+
+$H_A$: the variance changes with the fitted values.
+
+```{r}
+ncvTest(lm_final)
+```
+
+Since the $p$-value is less than $\alpha = 0.05$, we reject $H_0$. Heteroskedasticity is present. The square root transformation improved the scale but did not fully resolve non-constant variance. This is largely driven by the extreme ethanol observations identified in Step 11.
+
+**Normality.** The Shapiro-Wilk test requires $n \leq 5000$. Our data set has $n = 7{,}384$. We take a random sample of 5000 residuals with `set.seed(633)` for reproducibility. For large samples we look at the value of $W$ rather than the $p$-value alone. A value of $W$ close to 1 indicates approximate normality. Values below 0.95 are cause for concern.
+
+```{r}
+set.seed(633)
+shapiro.test(sample(resid(lm_final), 5000))
+```
+
+$W = 0.837$, which is well below 0.95. Since the $p$-value is less than $\alpha = 0.05$, we reject $H_0$ of normality. The heavy tails in the Q-Q plot are real. As we show in Step 11, this is driven by a small number of unusual observations.
+
+### Step 11: Outliers, Leverage, and Influence
+
+**Why we check all three.** A large residual means the model fits that observation poorly. High leverage means the observation is far from the center of the predictor space. Cook's distance combines both: it measures how much all fitted values change if one observation is removed. We check all three to get a complete picture.
+
+We use the leverage threshold $2(p+1)/n$ where $p = 11$ is the number of predictors. We use Cook's distance threshold $4/n$. We use a residual cutoff of 4 rather than the usual 2 or 3 because with $n = 7{,}384$, using 2 would flag too many points to examine meaningfully.
+
+```{r}
+rstud <- rstudent(lm_final)
+stdres <- rstandard(lm_final)
+lev    <- hatvalues(lm_final)
+cook   <- cooks.distance(lm_final)
+
+n <- nrow(co2)
+p <- length(coef(lm_final)) - 1
+
+sum(abs(stdres) > 4)
+sum(lev > 2 * (p + 1) / n)
+sum(cook > 4 / n)
+```
+
+There are 20 observations with absolute standardized residuals above 4, 730 high-leverage observations, and 414 influential observations by Cook's distance. The high leverage count is large but expected: the ethanol group spans a very different range of `fuel_comb` (10 to 26 L/100 km) compared to other groups, making ethanol observations structurally influential on the ethanol curve.
+
+**Why we look at the actual vehicle names.** Knowing which vehicles are unusual helps us decide what to do with them. A data entry error could justify removal. A real vehicle with genuinely unusual characteristics should be kept and discussed as a limitation.
+
+```{r}
+head(co2[order(abs(rstud), decreasing = TRUE),
+         c("make", "model", "vehicle_class", "CO2", "fuel_comb", "fuel_type")], 10)
+
+head(co2[order(cook, decreasing = TRUE),
+         c("make", "model", "vehicle_class", "CO2", "fuel_comb", "fuel_type")], 10)
+```
+
+*Table 4. Ten most unusual vehicles by studentized residual.* *Table 5. Ten most influential vehicles by Cook's distance.*
+
+The most unusual observation is a Mercedes-Benz GLA 250 4MATIC classified as fuel type E with `fuel_comb` = 12.0 L/100 km. This is unusually low for an E85 vehicle since most E85 vehicles use 15 to 26 L/100 km. This may be a flex-fuel vehicle rated on E85 but typically driven on regular gasoline. The Bugatti Chiron (CO2 = 522 g/km, `fuel_comb` = 22.2, fuel type Z) is a genuinely extreme but real vehicle. None of the unusual observations appear to be data entry errors. We keep all observations in the main analysis.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 3
+
+par(mfrow = c(1, 3))
+plot(abs(rstud), pch = 19, cex = 0.4,
+     ylab = "Absolute studentized residuals", xlab = "Observation")
+abline(h = 4)
+
+plot(lev, pch = 19, cex = 0.4,
+     ylab = "Leverage", xlab = "Observation")
+abline(h = 2 * (p + 1) / n)
+
+plot(cook, pch = 19, cex = 0.4,
+     ylab = "Cook's distance", xlab = "Observation")
+abline(h = 4 / n)
+par(mfrow = c(1, 1))
+```
+
+*Figure 8. Studentized residuals, leverage, and Cook's distance by observation index. Reference lines show the thresholds used.*
+
+### Step 12: Prediction
+
+**Why this prediction point.** We predict CO2 emissions for a regular gasoline vehicle (fuel type X) with combined fuel consumption of 9.0 L/100 km. This is typical of a compact car such as a Honda Civic or Toyota Corolla. We confirmed in Step 4 that 9.0 is well inside the observed range for fuel type X (4.1 to 21.2), so this is an interpolation.
+
+**Why we square the prediction.** The model was fit on the $\sqrt{\text{CO2}}$ scale. The `predict()` function returns predictions on that scale. Squaring gives the prediction on the original CO2 scale in g/km.
+
+**Why we show both the prediction interval and the confidence interval.** The prediction interval covers 95% of individual vehicle CO2 emissions at these predictor values. The confidence interval covers the true mean CO2 for all vehicles with these predictor values. The prediction interval is always wider because it accounts for both uncertainty in the estimated mean and natural variation among individual vehicles.
+
+```{r}
+new_car <- data.frame(
+  fuel_comb = 9.0,
+  fuel_type = factor("X", levels = levels(co2$fuel_type))
+)
+
+pred_sqrt <- predict(lm_final, newdata = new_car, interval = "predict")
+pred_sqrt
+
+pred_co2 <- pred_sqrt^2
+pred_co2
+```
+
+The predicted CO2 emissions are **209.3 g/km**. The 95% prediction interval on the original scale is **(204.0, 214.7) g/km**. This interval applies to a single new vehicle with these characteristics.
+
+```{r}
+pred_ci <- predict(lm_final, newdata = new_car, interval = "confidence")
+pred_ci^2
+```
+
+The 95% confidence interval for the mean CO2 among all regular gasoline vehicles with fuel consumption 9.0 L/100 km is **(209.2, 209.4) g/km**. Since the $p$-value for the NCV test was less than $\alpha = 0.05$ and some heteroskedasticity remains, these intervals should be interpreted with some caution. They are still reliable for typical vehicles in the interior of the data range.
+
+## Conclusion
+
+We modeled vehicle CO2 emissions using a square root transformation of the response, combined fuel consumption as the main quantitative predictor, and fuel type as a categorical predictor with interactions. The Box-Cox analysis supported $\lambda = 0.5$. Stepwise AIC selection led to a final interaction model where the quadratic fuel consumption curve differs by fuel type. The final model explains 99.7% of the variation in $\sqrt{\text{CO2}}$.
+
+Combined fuel consumption is the strongest predictor of CO2 emissions. The relationship is curved and differs by fuel type. Diesel vehicles emit less CO2 at similar fuel consumption levels compared to gasoline vehicles. The ethanol curve rises more steeply because E85 has lower energy density than gasoline.
+
+The main limitation is that mild heteroskedasticity remains after the square root transformation, and the normality assumption is violated primarily due to 20 extreme observations. These are real vehicles and were kept in the analysis. Future work could explore weighted least squares to address the remaining heteroskedasticity, or a log transformation of `fuel_comb` to further linearize the relationship.
