@@ -1,5 +1,18 @@
 # CO₂ Emissions and Fuel Consumption: A Multiple Linear Regression Analysis of Canadian Vehicle Data
  
+
+![R](https://img.shields.io/badge/R-Quarto-276DC3)
+[![License](https://img.shields.io/badge/License-MIT-c9a227)](LICENSE)
+
+<p align="center">
+  <a href="https://github.com/pranjalts07/co2_emissions/stargazers">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/star-dark.svg">
+      <img src="assets/star-light.svg" alt="Please star the repo" width="400">
+    </picture>
+  </a>
+</p>
+
 ## Overview
 
 This project investigates how combined fuel consumption and fuel type jointly influence vehicle CO₂ emissions using multiple linear regression. Using data from 7,384 Canadian vehicles, we build a regression model that accounts for the nonlinear relationship between fuel consumption and emissions, and allows that relationship to differ across fuel types.
